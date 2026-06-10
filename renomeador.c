@@ -1,325 +1,538 @@
-#include <windows.h>
-#include <commdlg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <ctype.h>
+#include <unistd.h>
 
-// Definições de controles
-#define IDC_EDIT_PATH         1001
-#define IDC_EDIT_EXT          1002
-#define IDC_EDIT_NEWNAME      1003
-#define IDC_BTN_BROWSE        1004
-#define IDC_BTN_PREVIEW       1005
-#define IDC_BTN_RENAME        1006
-#define IDC_LIST_PREVIEW      1007
-#define IDC_STATIC_PATH       1008
-#define IDC_STATIC_EXT        1009
-#define IDC_STATIC_NEWNAME    1010
+#ifdef _WIN32
+    #include <windows.h>
+    #define PATH_SEPARATOR '\\'
+    #define CLEAR_SCREEN "cls"
+#else
+    #include <linux/limits.h>
+    #define PATH_SEPARATOR '/'
+    #define CLEAR_SCREEN "clear"
+#endif
 
-// Estrutura para armazenar arquivos
+#define MAX_PATH 4096
+#define MAX_FILES 10000
+#define MAX_NAME 512
+#define MAX_EXT 50
+
 typedef struct {
-    char original[MAX_PATH];
-    char novo[MAX_PATH];
-} ArquivoRenomeado;
+    char old_name[MAX_NAME];
+    char new_name[MAX_NAME];
+    char full_path[MAX_PATH];
+    char extension[MAX_EXT];
+    int selected;
+    long long size;
+} FileInfo;
 
-ArquivoRenomeado* arquivos = NULL;
-int totalArquivos = 0;
-HWND hListPreview;
-HWND hEditPath, hEditExt, hEditNewName;
+FileInfo files[MAX_FILES];
+int total_files = 0;
+char current_dir[MAX_PATH];
 
-// Função para ordenar arquivos
-int CompareStrings(const void* a, const void* b) {
-    return strcmp(((ArquivoRenomeado*)a)->original, ((ArquivoRenomeado*)b)->original);
+// Funcao para limpar tela
+void clear_screen() {
+    system(CLEAR_SCREEN);
 }
 
-// Função para carregar arquivos da pasta
-int CarregarArquivos(const char* path, const char* extensao) {
-    DIR* dir;
-    struct dirent* entry;
-    struct stat st;
-    char fullPath[MAX_PATH];
-    int count = 0;
-    
-    if (arquivos) {
-        free(arquivos);
-        arquivos = NULL;
-    }
-    
-    dir = opendir(path);
-    if (!dir) return 0;
-    
-    // Primeira passagem: contar arquivos
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
-        
-        snprintf(fullPath, sizeof(fullPath), "%s\\%s", path, entry->d_name);
-        if (stat(fullPath, &st) == 0 && S_ISREG(st.st_mode)) {
-            char* ext = strrchr(entry->d_name, '.');
-            if (ext && stricmp(ext + 1, extensao) == 0) {
-                count++;
-            }
+// Funcao para obter extensao do arquivo
+void get_extension(const char *filename, char *ext) {
+    const char *dot = strrchr(filename, '.');
+    if (dot && dot != filename) {
+        strcpy(ext, dot + 1);
+        for (int i = 0; ext[i]; i++) {
+            ext[i] = tolower(ext[i]);
         }
+    } else {
+        strcpy(ext, "");
     }
+}
+
+// Funcao para remover extensao
+void remove_extension(char *filename) {
+    char *dot = strrchr(filename, '.');
+    if (dot) {
+        *dot = '\0';
+    }
+}
+
+// Funcao para formatar tamanho do arquivo
+void format_size(long long size, char *output) {
+    if (size < 1024) {
+        sprintf(output, "%lld B", size);
+    } else if (size < 1024 * 1024) {
+        sprintf(output, "%.1f KB", size / 1024.0);
+    } else if (size < 1024 * 1024 * 1024) {
+        sprintf(output, "%.1f MB", size / (1024.0 * 1024));
+    } else {
+        sprintf(output, "%.1f GB", size / (1024.0 * 1024 * 1024));
+    }
+}
+
+// Funcao para obter tipo do arquivo
+const char* get_file_type(const char *ext) {
+    if (strcmp(ext, "jpg") == 0 || strcmp(ext, "jpeg") == 0 || 
+        strcmp(ext, "png") == 0 || strcmp(ext, "gif") == 0 || strcmp(ext, "bmp") == 0)
+        return "[IMG]";
+    if (strcmp(ext, "pdf") == 0) return "[PDF]";
+    if (strcmp(ext, "txt") == 0) return "[TXT]";
+    if (strcmp(ext, "doc") == 0 || strcmp(ext, "docx") == 0) return "[DOC]";
+    if (strcmp(ext, "xls") == 0 || strcmp(ext, "xlsx") == 0) return "[XLS]";
+    if (strcmp(ext, "zip") == 0 || strcmp(ext, "rar") == 0 || strcmp(ext, "7z") == 0) return "[ZIP]";
+    if (strcmp(ext, "mp3") == 0 || strcmp(ext, "wav") == 0) return "[AUD]";
+    if (strcmp(ext, "mp4") == 0 || strcmp(ext, "avi") == 0 || strcmp(ext, "mkv") == 0) return "[VID]";
+    if (strcmp(ext, "html") == 0 || strcmp(ext, "htm") == 0) return "[WEB]";
+    if (strcmp(ext, "c") == 0 || strcmp(ext, "cpp") == 0 || strcmp(ext, "py") == 0) return "[COD]";
+    return "[FIL]";
+}
+
+// Funcao para listar arquivos do diretorio
+int list_files(const char *directory) {
+    DIR *dir;
+    struct dirent *entry;
+    struct stat st;
+    char full_path[MAX_PATH];
     
-    if (count == 0) {
-        closedir(dir);
+    dir = opendir(directory);
+    if (dir == NULL) {
+        printf("[ERRO] Nao foi possivel abrir o diretorio '%s'\n", directory);
         return 0;
     }
     
-    // Alocar memória
-    arquivos = (ArquivoRenomeado*)malloc(count * sizeof(ArquivoRenomeado));
-    if (!arquivos) {
-        closedir(dir);
-        return 0;
-    }
+    total_files = 0;
     
-    // Segunda passagem: armazenar nomes
-    rewinddir(dir);
-    int index = 0;
-    while ((entry = readdir(dir)) != NULL && index < count) {
-        if (entry->d_name[0] == '.') continue;
+    while ((entry = readdir(dir)) != NULL && total_files < MAX_FILES) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
         
-        snprintf(fullPath, sizeof(fullPath), "%s\\%s", path, entry->d_name);
-        if (stat(fullPath, &st) == 0 && S_ISREG(st.st_mode)) {
-            char* ext = strrchr(entry->d_name, '.');
-            if (ext && stricmp(ext + 1, extensao) == 0) {
-                strcpy(arquivos[index].original, entry->d_name);
-                index++;
-            }
+        snprintf(full_path, sizeof(full_path), "%s%c%s", directory, PATH_SEPARATOR, entry->d_name);
+        
+        if (stat(full_path, &st) == 0 && S_ISREG(st.st_mode)) {
+            strcpy(files[total_files].old_name, entry->d_name);
+            strcpy(files[total_files].full_path, full_path);
+            get_extension(entry->d_name, files[total_files].extension);
+            files[total_files].selected = 1;
+            files[total_files].size = st.st_size;
+            total_files++;
         }
     }
     
     closedir(dir);
-    
-    // Ordenar arquivos
-    qsort(arquivos, count, sizeof(ArquivoRenomeado), CompareStrings);
-    
-    return count;
+    return total_files;
 }
 
-// Função para gerar novos nomes
-void GerarNovosNomes(const char* baseName, int startNumber) {
-    char novoNome[MAX_PATH];
+// Funcao para exibir lista de arquivos
+void display_files() {
+    char size_str[20];
     
-    for (int i = 0; i < totalArquivos; i++) {
-        char* ext = strrchr(arquivos[i].original, '.');
-        snprintf(novoNome, sizeof(novoNome), "%s_%03d%s", baseName, startNumber + i, ext);
-        strcpy(arquivos[i].novo, novoNome);
+    printf("\n[ARQUIVOS ENCONTRADOS]\n");
+    printf("================================================================================\n");
+    printf("  #  | TIPO | NOME DO ARQUIVO                                      | TAMANHO    \n");
+    printf("================================================================================\n");
+    
+    for (int i = 0; i < total_files; i++) {
+        format_size(files[i].size, size_str);
+        const char *type = get_file_type(files[i].extension);
+        printf("  %-3d | %s | %-45s | %10s\n", 
+               i + 1, 
+               type,
+               files[i].old_name,
+               size_str);
     }
+    printf("================================================================================\n");
+    printf("Total: %d arquivo(s)\n", total_files);
 }
 
-// Função para atualizar a lista de preview
-void AtualizarPreview(HWND hList) {
-    SendMessage(hList, LB_RESETCONTENT, 0, 0);
+// Funcao para selecionar arquivos
+void select_files() {
+    char input[100];
+    int choice;
     
-    char previewText[512];
-    for (int i = 0; i < totalArquivos; i++) {
-        snprintf(previewText, sizeof(previewText), "%s  →  %s", 
-                 arquivos[i].original, arquivos[i].novo);
-        SendMessage(hList, LB_ADDSTRING, 0, (LPARAM)previewText);
-    }
-}
-
-// Função para renomear arquivos
-void RenomearArquivos(const char* path) {
-    char oldPath[MAX_PATH];
-    char newPath[MAX_PATH];
-    int successCount = 0;
+    printf("\n[SELECAO DE ARQUIVOS]\n");
+    printf("+--------------------------------------------------+\n");
+    printf("| 1 - Selecionar todos                             |\n");
+    printf("| 2 - Selecionar nenhum                            |\n");
+    printf("| 3 - Selecionar por intervalo                     |\n");
+    printf("| 4 - Selecionar por extensao                      |\n");
+    printf("| 5 - Voltar                                       |\n");
+    printf("+--------------------------------------------------+\n");
+    printf("Opcao: ");
     
-    for (int i = 0; i < totalArquivos; i++) {
-        snprintf(oldPath, sizeof(oldPath), "%s\\%s", path, arquivos[i].original);
-        snprintf(newPath, sizeof(newPath), "%s\\%s", path, arquivos[i].novo);
-        
-        if (rename(oldPath, newPath) == 0) {
-            successCount++;
-        }
-    }
+    fgets(input, sizeof(input), stdin);
+    choice = atoi(input);
     
-    char msg[256];
-    snprintf(msg, sizeof(msg), "%d de %d arquivos renomeados com sucesso!", 
-             successCount, totalArquivos);
-    MessageBox(NULL, msg, "Resultado", MB_OK | MB_ICONINFORMATION);
-}
-
-// Procedimento da janela principal
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            // Criar fonte
-            HFONT hFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    switch(choice) {
+        case 1:
+            for (int i = 0; i < total_files; i++) {
+                files[i].selected = 1;
+            }
+            printf("[OK] Todos os arquivos selecionados.\n");
+            break;
             
-            // Labels
-            CreateWindow("STATIC", "Caminho da pasta:", WS_CHILD | WS_VISIBLE,
-                20, 20, 120, 20, hwnd, (HMENU)IDC_STATIC_PATH, NULL, NULL);
+        case 2:
+            for (int i = 0; i < total_files; i++) {
+                files[i].selected = 0;
+            }
+            printf("[OK] Nenhum arquivo selecionado.\n");
+            break;
             
-            CreateWindow("STATIC", "Extensão (sem ponto):", WS_CHILD | WS_VISIBLE,
-                20, 70, 120, 20, hwnd, (HMENU)IDC_STATIC_EXT, NULL, NULL);
+        case 3: {
+            printf("Digite os numeros (ex: 1,3,5-8): ");
+            fgets(input, sizeof(input), stdin);
             
-            CreateWindow("STATIC", "Nome base:", WS_CHILD | WS_VISIBLE,
-                20, 120, 80, 20, hwnd, (HMENU)IDC_STATIC_NEWNAME, NULL, NULL);
-            
-            // Edit boxes
-            hEditPath = CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                20, 40, 300, 25, hwnd, (HMENU)IDC_EDIT_PATH, NULL, NULL);
-            
-            hEditExt = CreateWindow("EDIT", "jpg", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                20, 90, 150, 25, hwnd, (HMENU)IDC_EDIT_EXT, NULL, NULL);
-            
-            hEditNewName = CreateWindow("EDIT", "", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                20, 140, 300, 25, hwnd, (HMENU)IDC_EDIT_NEWNAME, NULL, NULL);
-            
-            // Botão Procurar
-            CreateWindow("BUTTON", "Procurar...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                330, 40, 80, 25, hwnd, (HMENU)IDC_BTN_BROWSE, NULL, NULL);
-            
-            // Botões de ação
-            CreateWindow("BUTTON", "Visualizar Alterações", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                20, 180, 180, 35, hwnd, (HMENU)IDC_BTN_PREVIEW, NULL, NULL);
-            
-            CreateWindow("BUTTON", "Renomear Arquivos", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                210, 180, 180, 35, hwnd, (HMENU)IDC_BTN_RENAME, NULL, NULL);
-            
-            // Lista de preview
-            hListPreview = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_BORDER | 
-                WS_VSCROLL | LBS_NOTIFY,
-                20, 230, 400, 300, hwnd, (HMENU)IDC_LIST_PREVIEW, NULL, NULL);
-            
-            // Aplicar fonte aos controles
-            SendMessage(hEditPath, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(hEditExt, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(hEditNewName, WM_SETFONT, (WPARAM)hFont, TRUE);
-            SendMessage(hListPreview, WM_SETFONT, (WPARAM)hFont, TRUE);
-            
+            char *token = strtok(input, ",\n");
+            while (token) {
+                if (strchr(token, '-')) {
+                    int start, end;
+                    sscanf(token, "%d-%d", &start, &end);
+                    for (int i = start - 1; i < end && i < total_files; i++) {
+                        if (i >= 0) files[i].selected = 1;
+                    }
+                } else {
+                    int num = atoi(token);
+                    if (num >= 1 && num <= total_files) {
+                        files[num - 1].selected = 1;
+                    }
+                }
+                token = strtok(NULL, ",\n");
+            }
+            printf("[OK] Selecao atualizada.\n");
             break;
         }
         
-        case WM_COMMAND: {
-            int wmId = LOWORD(wParam);
+        case 4: {
+            char ext[MAX_EXT];
+            printf("Digite a extensao (sem ponto): ");
+            fgets(ext, sizeof(ext), stdin);
+            ext[strcspn(ext, "\n")] = 0;
             
-            if (wmId == IDC_BTN_BROWSE) {
-                char folderPath[MAX_PATH] = "";
-                BROWSEINFO bi = {0};
-                bi.hwndOwner = hwnd;
-                bi.lpszTitle = "Selecione a pasta com os arquivos";
-                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-                
-                LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
-                if (pidl != NULL) {
-                    if (SHGetPathFromIDList(pidl, folderPath)) {
-                        SetWindowText(hEditPath, folderPath);
-                    }
-                    CoTaskMemFree(pidl);
+            int count = 0;
+            for (int i = 0; i < total_files; i++) {
+                if (strcmp(files[i].extension, ext) == 0) {
+                    files[i].selected = 1;
+                    count++;
                 }
             }
-            else if (wmId == IDC_BTN_PREVIEW) {
-                char path[MAX_PATH];
-                char extensao[50];
-                char novoNome[100];
+            printf("[OK] %d arquivo(s) com extensao .%s selecionado(s).\n", count, ext);
+            break;
+        }
+        
+        case 5:
+            return;
+            
+        default:
+            printf("[ERRO] Opcao invalida!\n");
+    }
+    
+    // Mostrar resumo da selecao
+    int selected = 0;
+    for (int i = 0; i < total_files; i++) {
+        if (files[i].selected) selected++;
+    }
+    printf("\n[RESUMO] %d/%d arquivos selecionados.\n", selected, total_files);
+}
+
+// Funcao para gerar novo nome
+void generate_new_name(char *new_name, const char *old_name, int index, 
+                       const char *prefix, const char *suffix, 
+                       const char *find_text, const char *replace_text,
+                       int use_numbering, int start_number, int padding) {
+    
+    char name_without_ext[MAX_NAME];
+    char ext[MAX_EXT];
+    
+    strcpy(name_without_ext, old_name);
+    remove_extension(name_without_ext);
+    get_extension(old_name, ext);
+    
+    // Aplicar substituicao
+    if (strlen(find_text) > 0 && strlen(replace_text) > 0) {
+        char temp[MAX_NAME];
+        char *pos;
+        char *dest = temp;
+        const char *src = name_without_ext;
+        
+        while ((pos = strstr(src, find_text)) != NULL) {
+            int len = pos - src;
+            strncpy(dest, src, len);
+            dest += len;
+            strcpy(dest, replace_text);
+            dest += strlen(replace_text);
+            src = pos + strlen(find_text);
+        }
+        strcpy(dest, src);
+        strcpy(name_without_ext, temp);
+    }
+    
+    // Aplicar prefixo e sufixo
+    char temp_name[MAX_NAME];
+    snprintf(temp_name, sizeof(temp_name), "%s%s%s", prefix, name_without_ext, suffix);
+    
+    // Aplicar numeracao
+    if (use_numbering) {
+        int number = start_number + index;
+        char num_str[10];
+        
+        if (padding == 1) sprintf(num_str, "%d", number);
+        else if (padding == 2) sprintf(num_str, "%02d", number);
+        else if (padding == 3) sprintf(num_str, "%03d", number);
+        else sprintf(num_str, "%04d", number);
+        
+        snprintf(new_name, MAX_NAME, "%s_%s.%s", temp_name, num_str, ext);
+    } else {
+        snprintf(new_name, MAX_NAME, "%s.%s", temp_name, ext);
+    }
+}
+
+// Funcao para mostrar preview
+void show_preview(const char *prefix, const char *suffix, 
+                  const char *find_text, const char *replace_text,
+                  int use_numbering, int start_number, int padding) {
+    
+    printf("\n[PREVIEW DA RENOMEACAO]\n");
+    printf("================================================================================\n");
+    printf("  #  | NOME ORIGINAL                                        -> NOVO NOME\n");
+    printf("================================================================================\n");
+    
+    int seq = 0;
+    for (int i = 0; i < total_files; i++) {
+        if (!files[i].selected) continue;
+        
+        char new_name[MAX_NAME];
+        generate_new_name(new_name, files[i].old_name, seq, 
+                         prefix, suffix, find_text, replace_text,
+                         use_numbering, start_number, padding);
+        
+        printf("  %-3d | %-45s -> %s\n", seq + 1, files[i].old_name, new_name);
+        seq++;
+    }
+    printf("================================================================================\n");
+    printf("Total a renomear: %d arquivo(s)\n", seq);
+}
+
+// Funcao para aplicar renomeacao
+int apply_renaming(const char *prefix, const char *suffix, 
+                   const char *find_text, const char *replace_text,
+                   int use_numbering, int start_number, int padding) {
+    
+    char old_path[MAX_PATH];
+    char new_path[MAX_PATH];
+    int renamed = 0;
+    int seq = 0;
+    
+    printf("\n[RENOMEANDO ARQUIVOS...]\n");
+    printf("--------------------------------------------------------------------------------\n");
+    
+    for (int i = 0; i < total_files; i++) {
+        if (!files[i].selected) continue;
+        
+        char new_name[MAX_NAME];
+        generate_new_name(new_name, files[i].old_name, seq, 
+                         prefix, suffix, find_text, replace_text,
+                         use_numbering, start_number, padding);
+        
+        snprintf(old_path, sizeof(old_path), "%s", files[i].full_path);
+        snprintf(new_path, sizeof(new_path), "%s%c%s", current_dir, PATH_SEPARATOR, new_name);
+        
+        if (rename(old_path, new_path) == 0) {
+            printf("  [OK] %s\n", files[i].old_name);
+            printf("       -> %s\n", new_name);
+            renamed++;
+        } else {
+            printf("  [ERRO] %s\n", files[i].old_name);
+        }
+        
+        seq++;
+    }
+    
+    printf("--------------------------------------------------------------------------------\n");
+    printf("[OK] Renomeacao concluida! %d arquivo(s) renomeado(s).\n", renamed);
+    
+    return renamed;
+}
+
+// Funcao principal
+int main() {
+    char prefix[100] = "";
+    char suffix[100] = "";
+    char find_text[100] = "";
+    char replace_text[100] = "";
+    int start_number = 1;
+    int padding = 1;
+    int use_numbering = 0;
+    int option;
+    
+    clear_screen();
+    
+    printf("+================================================================================+\n");
+    printf("|                      RENOMEADOR EM MASSA DE ARQUIVOS                           |\n");
+    printf("|                             Versao 2.0 em C                                    |\n");
+    printf("+================================================================================+\n\n");
+    
+    // Obter diretorio atual
+    if (getcwd(current_dir, sizeof(current_dir)) == NULL) {
+        printf("[ERRO] Ao obter diretorio atual!\n");
+        return 1;
+    }
+    
+    printf("[DIRETORIO ATUAL] %s\n", current_dir);
+    printf("Deseja usar este diretorio? (S/n): ");
+    
+    char use_current[10];
+    fgets(use_current, sizeof(use_current), stdin);
+    
+    if (use_current[0] == 'n' || use_current[0] == 'N') {
+        printf("Digite o caminho da pasta: ");
+        fgets(current_dir, sizeof(current_dir), stdin);
+        current_dir[strcspn(current_dir, "\n")] = 0;
+    }
+    
+    // Listar arquivos
+    if (!list_files(current_dir)) {
+        printf("[ERRO] Nenhum arquivo encontrado no diretorio.\n");
+        printf("Pressione Enter para sair...");
+        getchar();
+        return 1;
+    }
+    
+    // Menu principal
+    do {
+        clear_screen();
+        
+        printf("+================================================================================+\n");
+        printf("|                           MENU PRINCIPAL                                       |\n");
+        printf("+================================================================================+\n");
+        
+        display_files();
+        
+        printf("\n[CONFIGURACOES ATUAIS]\n");
+        printf("+--------------------------------------------------------------------------------+\n");
+        printf("| Prefixo: '%s'                                                                  \n", strlen(prefix) ? prefix : "(nenhum)");
+        printf("| Sufixo:  '%s'                                                                  \n", strlen(suffix) ? suffix : "(nenhum)");
+        printf("| Substituir: '%s' -> '%s'                                                        \n", 
+               strlen(find_text) ? find_text : "(nenhum)", 
+               strlen(replace_text) ? replace_text : "(nenhum)");
+        printf("| Numeracao: %s                                                                  \n", use_numbering ? "SIM" : "NAO");
+        if (use_numbering) {
+            printf("|   * Inicio: %d | Padding: %d                                                  \n", start_number, padding);
+        }
+        printf("+--------------------------------------------------------------------------------+\n");
+        
+        printf("\n[OPCOES]\n");
+        printf("+--------------------------------------------------------------------------------+\n");
+        printf("| 1 - Selecionar arquivos                                                        |\n");
+        printf("| 2 - Configurar prefixo                                                         |\n");
+        printf("| 3 - Configurar sufixo                                                          |\n");
+        printf("| 4 - Configurar substituicao de texto                                           |\n");
+        printf("| 5 - Configurar numeracao                                                       |\n");
+        printf("| 6 - Preview e renomear                                                         |\n");
+        printf("| 0 - Sair                                                                       |\n");
+        printf("+--------------------------------------------------------------------------------+\n");
+        printf("Escolha uma opcao: ");
+        
+        fgets(use_current, sizeof(use_current), stdin);
+        option = atoi(use_current);
+        
+        switch(option) {
+            case 1:
+                select_files();
+                printf("\nPressione Enter para continuar...");
+                getchar();
+                break;
                 
-                GetWindowText(hEditPath, path, MAX_PATH);
-                GetWindowText(hEditExt, extensao, 50);
-                GetWindowText(hEditNewName, novoNome, 100);
+            case 2:
+                printf("Digite o prefixo: ");
+                fgets(prefix, sizeof(prefix), stdin);
+                prefix[strcspn(prefix, "\n")] = 0;
+                printf("[OK] Prefixo definido: '%s'\n", prefix);
+                printf("Pressione Enter para continuar...");
+                getchar();
+                break;
                 
-                if (strlen(path) == 0) {
-                    MessageBox(hwnd, "Selecione uma pasta!", "Erro", MB_OK | MB_ICONERROR);
-                    return 0;
-                }
-                if (strlen(extensao) == 0) {
-                    MessageBox(hwnd, "Informe a extensão dos arquivos!", "Erro", MB_OK | MB_ICONERROR);
-                    return 0;
-                }
-                if (strlen(novoNome) == 0) {
-                    MessageBox(hwnd, "Informe o nome base para os arquivos!", "Erro", MB_OK | MB_ICONERROR);
-                    return 0;
-                }
+            case 3:
+                printf("Digite o sufixo: ");
+                fgets(suffix, sizeof(suffix), stdin);
+                suffix[strcspn(suffix, "\n")] = 0;
+                printf("[OK] Sufixo definido: '%s'\n", suffix);
+                printf("Pressione Enter para continuar...");
+                getchar();
+                break;
                 
-                totalArquivos = CarregarArquivos(path, extensao);
-                if (totalArquivos == 0) {
-                    MessageBox(hwnd, "Nenhum arquivo encontrado com a extensão especificada!", 
-                              "Aviso", MB_OK | MB_ICONWARNING);
-                    SendMessage(hListPreview, LB_RESETCONTENT, 0, 0);
-                    return 0;
-                }
+            case 4:
+                printf("Texto a ser substituido: ");
+                fgets(find_text, sizeof(find_text), stdin);
+                find_text[strcspn(find_text, "\n")] = 0;
+                printf("Substituir por: ");
+                fgets(replace_text, sizeof(replace_text), stdin);
+                replace_text[strcspn(replace_text, "\n")] = 0;
+                printf("[OK] Substituicao configurada: '%s' -> '%s'\n", find_text, replace_text);
+                printf("Pressione Enter para continuar...");
+                getchar();
+                break;
                 
-                GerarNovosNomes(novoNome, 1);
-                AtualizarPreview(hListPreview);
-            }
-            else if (wmId == IDC_BTN_RENAME) {
-                if (totalArquivos == 0) {
-                    MessageBox(hwnd, "Gere uma pré-visualização primeiro!", 
-                              "Aviso", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
+            case 5:
+                printf("Adicionar numeracao? (1-SIM / 0-NAO): ");
+                fgets(use_current, sizeof(use_current), stdin);
+                use_numbering = atoi(use_current);
                 
-                char path[MAX_PATH];
-                GetWindowText(hEditPath, path, MAX_PATH);
-                
-                if (MessageBox(hwnd, "Confirmar renomeação dos arquivos?", 
-                              "Confirmar", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                    RenomearArquivos(path);
+                if (use_numbering) {
+                    printf("Numero inicial (padrao 1): ");
+                    fgets(use_current, sizeof(use_current), stdin);
+                    start_number = atoi(use_current);
+                    if (start_number < 1) start_number = 1;
                     
-                    // Limpar após renomear
-                    SendMessage(hListPreview, LB_RESETCONTENT, 0, 0);
-                    totalArquivos = 0;
-                    if (arquivos) {
-                        free(arquivos);
-                        arquivos = NULL;
-                    }
+                    printf("Padding (1=1,2,3 | 2=01,02,03 | 3=001,002): ");
+                    fgets(use_current, sizeof(use_current), stdin);
+                    padding = atoi(use_current);
+                    if (padding < 1) padding = 1;
+                    if (padding > 3) padding = 3;
                 }
+                printf("[OK] Numeracao %s\n", use_numbering ? "ativada" : "desativada");
+                printf("Pressione Enter para continuar...");
+                getchar();
+                break;
+                
+            case 6: {
+                clear_screen();
+                show_preview(prefix, suffix, find_text, replace_text, 
+                           use_numbering, start_number, padding);
+                
+                printf("\n[ATENCAO] Esta acao ira renomear os arquivos permanentemente!\n");
+                printf("Confirmar renomeacao? (s/N): ");
+                
+                char confirm[10];
+                fgets(confirm, sizeof(confirm), stdin);
+                
+                if (confirm[0] == 's' || confirm[0] == 'S') {
+                    apply_renaming(prefix, suffix, find_text, replace_text,
+                                 use_numbering, start_number, padding);
+                    
+                    // Recarregar lista de arquivos
+                    list_files(current_dir);
+                } else {
+                    printf("[CANCELADO] Operacao cancelada.\n");
+                }
+                
+                printf("\nPressione Enter para continuar...");
+                getchar();
+                break;
             }
-            break;
+            
+            case 0:
+                printf("[SAIR] Saindo...\n");
+                break;
+                
+            default:
+                printf("[ERRO] Opcao invalida!\n");
+                printf("Pressione Enter para continuar...");
+                getchar();
         }
         
-        case WM_DESTROY:
-            if (arquivos) free(arquivos);
-            PostQuitMessage(0);
-            break;
-    }
+    } while (option != 0);
     
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
-
-// Ponto de entrada principal
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // Registrar a classe da janela
-    WNDCLASS wc = {0};
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.lpszClassName = "RenomeadorArquivosClass";
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    
-    if (!RegisterClass(&wc)) {
-        MessageBox(NULL, "Falha ao registrar a classe da janela!", "Erro", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-    
-    // Criar a janela principal
-    HWND hwnd = CreateWindow(
-        "RenomeadorArquivosClass",
-        "Renomeador de Arquivos em Lote",
-        WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, 460, 580,
-        NULL, NULL, hInstance, NULL);
-    
-    if (!hwnd) {
-        MessageBox(NULL, "Falha ao criar a janela!", "Erro", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-    
-    ShowWindow(hwnd, nCmdShow);
-    UpdateWindow(hwnd);
-    
-    // Loop de mensagens
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-    
-    return msg.wParam;
+    return 0;
 }
